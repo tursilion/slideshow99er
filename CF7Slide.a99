@@ -1,0 +1,1356 @@
+* CF7 based slideshow - hard coded for my little sample app
+*
+* My biggest pic is 18k, and disks at 400k, so we can store 22 images per disk
+* We'll just round that down to 20, and do 3 disks per category (60 pics each)
+* 
+* Updated to unlock and relock properly on F18A 1.6, but not tested yet.
+
+	DEF START,SFIRST,SLAST,SLOAD
+	
+	AORG >A000
+
+* VDP address for the palette GPU program
+PROGLD EQU >1B20
+
+SLOAD
+SFIRST
+	B @START
+	
+COUNT1 DATA >0001
+COUNT2 DATA >0001
+COUNT3 DATA >0001
+COUNT4 DATA >0001
+COUNT5 DATA >0001
+COUNT6 DATA >0001
+VDPBAD DATA >0000
+DSRDAT DATA >2EAA
+
+* Probably could use this table for the menu, too, but the menu is already written
+* So this is just used for the random mode.
+TABLE  DATA MODE1,MODE2,MODE3,MODE4,MODE5O,MODE6O
+	
+* We need to implement a CALL FILES(1) before use to make loading work better
+* That puts the top of VRAM at >3BDB. With that there, we can load everything
+* except per-scanline paletted images without conflicting with the disk system.
+* For those, we can backup the disk buffers as they are only 1061 bytes
+FILES
+	MOV R11,@SAVE		* save return address, assume DSR trashes everything
+	
+	LI R0,>0100
+	MOVB R0,@>834C		* 1 file desired
+	
+	LWPI >83E0			* GPLWS
+	LI R12,>1100		* We assume the disk base since this is intended for the CF7 anyway
+	SBO 0				* turn on the ROM
+	MOV @>400A,R1		* get pointer to the subprogram list
+FILELP
+	JEQ FILEDON			* no subprograms
+	MOV *R1+,R3			* link to next item
+	MOV *R1+,R2			* address of this one
+	MOV *R1+,R0			* we are looking for length 1, name >16
+	CI R0,>0116
+	JEQ FILEGT
+	MOV R3,R1			* nope, get next
+	JMP FILELP
+
+* Found it
+FILEGT
+	BL *R2				* go ahead and call it
+	NOP					* skipped on success
+
+FILEDON
+	LI R12,>1100		* We assume the disk base since this is intended for the CF7 anyway
+	SBZ 0				* turn off the ROM
+	LWPI >8300			* our own WS back
+	
+	MOV @SAVE,R11		* get back return address, no telling what the DSR did
+	B *R11
+
+* Modified version of the E/A DSRLNK - pass address of PAB in R0
+* BL instead BLWP, assumes DATA >8 	
+EA3DSR
+	   MOV R11,@SAVE
+	   AI R0,9
+	   MOV R0,@>8356				Load the PAB pointer
+A22B2  LI R5,8		                Get Data, should be 8 in the case I care about
+*      SZCB @A20FC,15               Zero out the EQUAL bit in the return CPU status (ahh, I don't do this)
+*      MOV  @>8356,0			    Get PAB pointer into R0
+       MOV  0,9						Copy to R9
+       AI   9,-8                    pab status
+       BL @VSBR                     vsbr: read size (from R0 to MSB R1 - for DSK1.BLAH is 9)
+       MOVB 1,3						copy to R3
+       SRL  3,8						move into low byte (make a count)
+       SETO 4						R4 = 0xffff
+       LI   2,NAMBUF               	name buffer in R2
+A22D0  INC  0						point to next byte of name (first byte on first pass)
+       INC  4						increment R4 (becomes 0 on first pass)
+       C    4,3						check if name finished
+       JEQ  A22E4                  	Jump ahead if so
+       BL @VSBR                 	vsbr: copy character of name
+       MOVB 1,*2+                  	copy 1 char into name buffer
+       CB   1,@DSRDAT              	is it .?
+       JNE  A22D0					no, loop around
+A22E4  MOV  4,4						if we get here, we either got the whole length or a '.'
+       JEQ  A238C                  	size=0, that's an error so skip out (no name to search)
+       CI   4,>0007					check against 7 characters (just the DSR name part)
+       JGT  A238C                  	size>7 is too long, so error out
+       CLR  @>83D0					clear the CRU base search
+       MOV  4,@>8354				length of the name (excluding '.') goes into >8354
+       MOV  4,@>2036               	also goes into >2036 (this is the official place)
+       INC  4						add one to name length
+       A    4,@>8356				add to the PAB pointer (>8356 points to the period!)
+       MOV  @>8356,@>2038          	save the pointer at >2038, too
+       LWPI >83E0                  	Load GPLWS to call the DSR with
+       CLR  1						R1=0
+       LI   12,>0F00				CRU base to >0F00 (first card -1)
+A2310  MOV  12,12					check base for 0
+       JEQ  A2316					if not 0, skip card off. Looks like a bug, it's never 0??
+       SBZ  0                      	card off
+A2316  AI   12,>0100				next card (>1000 for first)
+       CLR  @>83D0					clear CRU tracking at >83D0
+       CI   12,>2000				check if all cards are done
+       JEQ  A2388                  	if yes, we didn't find it, so error out
+       MOV  12,@>83D0              	save cru base
+       SBO  0                      	card on
+       LI   2,>4000					read card header bytes
+       CB   *2,@DSRDAT+1           	>AA = header
+       JNE  A2310                  	no: loop back for next card
+       AI   R2,8            		offset (contains the DATA statement, so 8 for a device, for >4008)
+       JMP  A2340					always jump into the loop from here
+A233A  MOV  @>83D2,2               	next sub
+       SBO  0                      	card on (already is, isn't it??)
+A2340  MOV  *2,2                   	grab link pointer to next
+       JEQ  A2310                  	If no pointer, link back to get next card
+       MOV  2,@>83D2               	save link address in >83D2
+       INCT 2						point to entry address
+       MOV  *2+,9                  	save address in R9
+       MOVB @>8355,5				get DSR name length (low byte of >8354)
+       JEQ  A2364                  	size=0, so take it 
+       CB   5,*2+					compare length to length in DSR
+       JNE  A233A                  	diff size: loop back for next
+       SRL  5,8						make length a word count
+       LI   6,NAMBUF               	name buffer pointer in R6
+A235C  CB   *6+,*2+                	check name
+       JNE  A233A                  	diff name: loop back for next entry
+       DEC  5						count down length
+       JNE  A235C                  	not done yet: next char
+A2364  INC  1                      	if we get here, everything matched, increment # calls
+       MOV  1,@>203A               	save # of calls
+       MOV  9,@>2034               	save address
+       MOV  12,@>2032              	save cru base
+       BL   *9                     	link
+       JMP  A233A                  	check next entry on the same card -- most DSRs will skip this 
+       SBZ  0                      	card off
+       LWPI >8300
+       MOV  9,0
+       BL @VSBR	                 	read pab status
+       SRL  1,13
+       JNE  A238E                  	err
+       MOV @SAVE,R11
+       B *R11
+A2388  LWPI >8300                   errors
+A238C  CLR  1                       code 0
+A238E  SWPB 1
+       MOVB R1,R0                   code in r0
+*      SOCB @>20FC,15               eq=1
+       MOV @sAVE,R11
+       B *R11
+	
+* VDP access
+
+* Read single byte at R0 into MSB R1
+VSBR	
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	MOVB @>8800,R1
+	B *R11
+
+* Read R2 bytes from VDP R0 to CPU R1	
+* Destroys R1,R2
+VMBR
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+VMBRLP
+	MOVB @>8800,*R1+
+	DEC R2
+	JNE VMBRLP
+	B *R11
+	
+* Write single byte to R0 from MSB R1
+* Destroys R0 (actually just oRs it)
+VSBW
+	ORI R0,>4000
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	MOVB R1,@>8C00
+	B *R11
+
+* Write two bytes to R0 from R1
+* Destroys R0 (actually just oRs it)
+V2BW
+	ORI R0,>4000
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	MOVB R1,@>8C00
+	SWPB R1
+	MOVB R1,@>8C00
+	B *R11
+
+* Reads two bytes from R0 to R1
+V2BR
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	MOVB @>8800,R1
+	SWPB R1
+	MOVB @>8800,R1
+	SWPB R1
+	B *R11
+
+* Write R2 bytes from CPU R1 to VDP R0
+* Destroys R0,R1,R2
+VMBW
+	ORI R0,>4000
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+VMBWLP
+	MOVB *R1+,@>8C00
+	DEC R2
+	JNE VMBWLP
+	B *R11
+	
+* Write address or register
+VDPWA
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	B *R11  
+	
+* load regs list to VDP address, end on >0000 and write >D0 (for sprites)
+* address of table in R1 (destroyed)
+LOADRG
+LOADLP
+	MOV *R1+,R0
+	JEQ LDRDN
+	SWPB R0
+	MOVB R0,@>8C02
+	SWPB R0
+	MOVB R0,@>8C02
+	JMP LOADLP
+LDRDN
+	LI R1,>D000
+	MOVB R1,@>8C00
+	B *R11
+	
+****************************
+* Load lower case charsets *
+****************************
+CHARSET
+ MOV R11,R9   * Save our return spot
+ LI R3,7
+
+* 'lowercase' letters
+ LI R0,>004A  * GPL vector address (not available for 99/4)
+ LI R1,>4B00  * dest in VDP - must OR with >4000 for write
+ LI R2,>001F  * how many chars
+ BL @GPLVDP   * this function goes somewhere later in your ROM
+
+* main set
+MNSET
+ LI R0,>0018  * GPL vector address
+ LI R1,>4900  * dest in VDP - must OR with >4000 for write
+ LI R2,>0040  * how many chars
+ BL @GPLVDP   * this function goes somewhere later in your ROM
+ B *R9        * RETURN TO CALLER
+
+*****************
+* GROM routines *
+*****************
+
+* Set GROM address
+GPLSET
+ MOVB R0,@>9C02
+ SWPB R0
+ MOVB R0,@>9C02
+ B *R11
+
+* Get a word from GPL
+GETGPL
+ MOVB @>9800,R0
+ SWPB R0
+ MOVB @>9800,R0
+ SWPB R0
+ B *R11
+
+* Copy R2 characters from a GPL copy function vectored at
+* R0 to VDP R1. GPL vector must be a B or BR and
+* the first actual instruction must be a DEST with an
+* immediate operand. Set R3 to 6 for 99/4 (6 byte characters)
+* or 7 for a 99/4A (7 byte characters)
+GPLVDP
+ MOV R11,R10    * save return address
+ BL @GPLSET     * set GROM address
+ BL @GETGPL     * Get branch instruction (not verified!)
+ ANDI R0,>1FFF  * mask out instruction part
+ AI R0,3        * skip instruction and destination
+ BL @GPLSET     * set new GROM address
+ BL @GETGPL     * get actual address of the table
+ BL @GPLSET     * and set that GROM address - GROM is now ready!
+
+ SWPB R1        * assume VDP is already prepared for write to save space
+ MOVB R1,@>8C02
+ SWPB R1
+ MOVB R1,@>8C02 * VDP is now ready!
+
+ CLR R0
+LP8
+ MOVB R0,@>8C00 * pad the top of the char with a space
+ MOV R3,R0      * then copy 7 (or 6) bytes
+
+LP9
+ MOVB @>9800,@>8C00  * copy a byte (both sides autoincrement)
+ DEC R0
+ JNE LP9
+
+ DEC R2         * next character
+ JNE LP8
+
+ B *R10
+ 
+* Setup for normal bitmap mode
+* returns with video off - set VDP R1 to E2 to enable (>81E2)
+BITMAP
+	MOV R11,@SAVE
+
+* set display and disable sprites
+	LI R1,BMREGS
+	BL @LOADRG
+	
+* set up SIT - We load the standard 0-255, 3 times
+	LI R0,>5800
+	BL @VDPWA
+	CLR R2
+NQ# 
+	CLR R1
+LP# 
+	MOVB R1,@>8C00
+	AI R1,>0100
+	CI R1,>0000
+	JNE LP#
+	INC R2
+	CI R2,3
+	JNE NQ#
+	
+	MOV @SAVE,R11
+	B *R11
+	
+* Setup for Multicolor mode
+* returns with video off - set VDP R1 to EA to enable (>81EA)
+MULTIC
+	MOV R11,@SAVE
+	
+* set display and disable sprites
+	LI R1,MLREGS
+	BL @LOADRG
+	
+* set up SIT - We load the standard 6 groups of 4 rows
+	LI R0,>4000
+	BL @VDPWA
+	CLR R0			* GROUP OFFSET
+NQM#
+	CLR R1			* ROW COUNT
+LPM#
+	CLR R2			* COLUMN COUNT
+LP2M#
+	MOVB R0,@>8C00
+	AI R0,>0100
+	INC R2
+	CI R2,32		* DONE ROW?
+	JNE LP2M#
+	INC R1
+	AI R0,>E000		* subtract >2000
+	CI R1,4			* DONE GROUP?
+	JNE LPM#
+	AI R0,>2000
+	CI R0,>C000		* DONE SCREEN?
+	JNE NQM#
+	
+	MOV @SAVE,R11
+	B *R11
+
+* Setup for Half-Multicolor	
+HALFM	
+	MOV R11,@SAVE
+	
+* set display and disable sprites
+	LI R1,HMREGS
+	BL @LOADRG
+
+* set up screen image table (not normal bitmap, each bank offset by 1 line)
+	LI R0,>7800
+	BL @VDPWA
+	CLR R2
+	CLR R1
+	MOV R1,R3
+NQH# 
+	MOV R3,R1
+LPH# 
+	MOVB R1,@>8C00
+	AI R1,>0100
+	CB R1,R3
+	JNE LPH#
+	AI R3,>2000		* change start offset by 32
+	INC R2
+	CI R2,3
+	JNE NQH#
+	
+	MOV @SAVE,R11
+	B *R11
+ 
+* KSCAN wrapper (always mode 5)
+KSCAN
+	LWPI >83E0	* GPLWS
+	LI R0,>0500
+	MOVB R0,@>8374
+	BL @>000E	* SCAN
+	LWPI >8300	* my WS
+	B *R11
+	
+* BCD Inc of R15, ONESHOT hijacks here and jumps back to the random mode 7
+* We have a lookup table now, but, again, all the code is already
+* tested with this function, so we'll keep it.
+BCDINC
+	MOV R11,@SAVE
+	MOV @ONESHOT,R11
+	JEQ BCDIN2
+	B @MODE72		* branch back to the random select
+BCDIN2	
+	INC R15
+	MOV R15,R11		* work copy
+	ANDI R11,>000F	* lsn
+	CI R11,>000A	* is it 10 or more?
+	JL BCDRET		* no, no more work
+	AI R15,>0006	* yes, wrap it around by adding another 6
+BCDRET
+	MOV @SAVE,R11	* back to caller
+	B *R11
+	
+	
+* LOAD image to VRAM:
+* R0 - VRAM address
+* R1 - Image number (1-60 -- must be BCD! No hex!)
+* R2 - (MSB) P, M or C
+LOAD
+	MOV R11,@SAVE2		* save return address
+	
+	MOV R0,@PAB+2		* patch load address
+	MOVB R2,@PAB+22		* patch filename last char
+	MOV R1,R0
+	ANDI R0,>00F0
+	SRL R0,4
+	AI R0,>0030
+	SWPB R0
+	ANDI R1,>000F
+	AI R1,>0030
+	SWPB R1
+	MOVB R0,@PAB+16
+	MOVB R1,@PAB+17		* patch filename number
+	LI R0,>1D00			* 1D00 assumed safe for the PAB
+	LI R1,PAB
+	LI R2,24
+	BL @VMBW			* write the PAB
+	LI R0,>1D00			* reload address
+
+	BL @EA3DSR			* almost the Editor/Assembler DSR (takes pointer in R0, no DATA 8)
+	
+	MOV @SAVE2,R11
+	B *R11
+	
+	
+* Mount a CF disk volume
+* CF7/NanoPEB disk mounting is easy, just write the volume number into VDP (2 bytes)
+* >3FFA for DSK1
+* >3FFC for DSK2
+* >3FFE for DSK3
+* Valid volumes are at least 1-39 (note: not 0). That's valid for a 32MB card.
+* R15 - picture number (1-60)
+* R14 - base volume number
+* 20 pictures per volume is assumed
+* destroys R0,R1,R2
+SETDSK
+	MOV R11,@SAVE
+	
+	LI R0,>3FFA
+	MOV R15,R2
+	CLR R1
+
+SETD1	
+	CI R2,>21		* quick divide by BCD 20 loop, with '1' offset
+	JL SETD2
+	AI R2,->20
+	INC R1
+	JMP SETD1
+
+SETD2	
+	A R14,R1		* add in base volume
+	BL @V2BW		* write the desired volume number
+	
+	MOV @SAVE,R11
+	B *R11
+
+* Delay for 10 seconds with both QUIT and Enter/Space detection
+* does it internally for the sake of the F18A versions
+DELAY
+	MOV R11,@SAVE2
+	LI R3,600
+
+DELLP	
+* This quit test copied from the console ROM
+	LI 12,>0024 			* Load CRU
+	LDCR @>0012,3
+	SRC 12,7				* delay
+	LI 12,>0006
+	STCR 5,8 				* Fetch CRU
+	CZC @QUITK,5 			* QUIT key?
+	JNE WAIT
+	B @REBOOT				* reboot if yes
+WAIT
+	BL @KSCAN
+	CLR R1
+	MOVB @>8375,R1
+	CI R1,>0F00				* FCTN-9 key?
+	JNE WAIT2
+	B @START				* restart if yes
+WAIT2
+	CI R1,>2000				* space key?
+	JNE WAIT3
+	LI R3,1					* countdown to 0
+WAIT3	
+	MOVB @>8802,R1			* check VDP status
+	JGT WAIT2				* no interrupt yet
+	JEQ WAIT2				* also no interrupt yet ;)
+	MOV @INTFTN,R1
+	JEQ WAIT4
+	BL *R1
+WAIT4	
+	DEC R3
+	JNE DELLP
+	
+	MOV @SAVE2,R11			* timed out
+	B *R11
+
+REBOOT
+	BL @RESTF18
+	
+* we've done all we can, the only thing left is that the VDP is still in enhanced mode
+	BLWP @>0000 			* Software reset	
+
+* Load an F18 Palette = pointer in R1	
+LOADPAL	
+	MOV R11,@SAVE
+	
+	LI R0,>AFC0          * Reg 47, value: 1100 0000, DPM = 1, AUTO INC = 1, palreg 0.       
+    BL   @VDPWA       
+	
+	LI R2,32
+	
+PALLP
+	MOVB *R1+,@>8C00
+	DEC R2
+	JNE PALLP
+	
+	LI R0,>AF00			  * Turn off the DPM mode
+	MOV  @SAVE,R11
+    B   @VDPWA       
+
+* Set VDP R1 and >83D4 for KSCAN - value in R0 MSB
+SETR1
+	MOV R11,@SAVE
+	MOVB R0,@>83D4
+	SWPB R0
+	LI R1,>8100
+	MOVB R1,R0
+	BL @VDPWA
+	MOV @SAVE,R11
+	B *R11
+
+* Reset the palette and GPU on the F18 (no harm if not F18, but expect registers to be messed up)	
+RESTF18
+	MOV R11,@SAVE2
+	
+* stop the GPU and then Reset (no harm if it's not F18)
+	LI R0,>B800				* stop the GPU -- this does stop the GPU
+	BL @VDPWA				* GPU will stop long before we're done
+
+* the per-palette scanline swaps the palettes around, so force back
+* to use palette 0.
+	LI R0,>9800				* V24 = 0 (palette 0 for sprites and tiles)
+	BL @VDPWA
+	
+RESTLP
+	MOVB @>8802,R0			* get VDPST2 (or VDPST)
+	JLT RESTLP				* if the MSB is set, wait (either RUNNING or FRAME_INT)
+	
+	LI R0,>8F00				* V15 = 0 - read SR0 again
+	BL @VDPWA
+	
+* reload the default palette (no harm if it's not F18)
+	MOV @SAVE2,R11
+	LI R1,PALT
+	BL @LOADPAL
+	
+* reset the F18A to defaults (except palette, requires 1.6)	
+	LI R0,>B280				* VR2/50, value 10000000
+	BL @VDPWA				* reset and lock F18A, or corrupt R2
+
+* and lock it if it's still unlocked (pre 1.6)
+	LI R0,>B900             * VR1/57, value 00000000
+	B @VDPWA               * write once (corrupts VDPR1)
+
+* generate a 16-bit random number in R1 
+RMASK	DATA >B400				* mask for 16 bit random numbers
+RAND	MOV  @RNDSED,R1         * Get seed
+		SRL  R1,1				* shift down
+		JNC  RAND01				* jump if 1 not shifted out
+		XOR  @RMASK,R1			* XOR the top half
+RAND01	MOV  R1,@RNDSED         * Save this number for next time 
+		B    *R11 
+	
+* Check if F18A is present, return unlocked if so, else
+* just restart.
+TESTF18
+* This is not the way Matthew intended, but it's a tad easier
+* We just check if the GPU is present by having it run a short
+* program, instead of mucking around with status bits.
+* May fail in the future, since it's not recommended, but if it
+* does, we can't use the GPU anyway.
+* F18A blind unlock code
+	MOV R11,@SAVE
+	
+	LI R0,>B280				* VR2/50, value 10000000
+	BL @VDPWA				* reset and lock F18A, or corrupt R2
+	
+	LI R0,>B91C             * VR1/57, value 00011100
+	BL @VDPWA               * write once (corrupts VDPR1)
+	BL @VDPWA               * write again (unlocks enhanced mode)
+
+* If we are not on the F18, then R1 is screwed up now, that's okay
+	LI R0,>1C00
+	LI R1,GPUTEST
+	LI R2,10
+	BL @VMBW				* copy program
+	
+	LI R0,>1C10				* test address
+	CLR R1
+	BL @V2BW				* clear it
+	
+* Start the GPU program, pause, then check the result
+	LI R0,>B61C				* MSB
+	BL @VDPWA
+	LI R0,>B700				* LSB and start
+	BL @VDPWA
+	NOP						* give it a moment - it's WAY faster than we are
+	LI R0,>1C10
+	BL @V2BR				* read the data
+	CI R1,>1234
+	JEQ F18YES
+	MOV @SAVE2,R11			* get failure address
+	B *R11
+F18YES
+	MOV @SAVE,R11
+	B *R11
+
+QUITK
+	DATA >1100				* CRU value for QUIT
+	
+GPUTEST
+	DATA >0200,>1234		LI R0,>1234
+	DATA >C800,>1C10		MOV R0,@>1C10
+	DATA >0340				IDLE
+
+* Per-scanline multicolor
+* Binary data for the GPU program. Our assemblers aren't smart enough to let
+* us assemble code at one address but target another.	
+PROG
+  DATA >04C0         CLR R0         * copy from
+  DATA >0201         LI R1,>1DFE    * copy to
+  DATA >1DFE  
+  DATA >0202         LI R2,171      * num bytes / 4 (first loop - 512 output bytes - 171 loops * 3 bytes = 513 bytes)
+  DATA >00AB  
+  DATA >06A0         BL @CPLP
+  DATA >1B3C  
+  DATA >0201         LI R1,>3800    * second part (4k)
+  DATA >3800  
+  DATA >0202         LI R2,1365     * num bytes / 4 (1365*3 bytes = 4095 - the one extra byte is in the first table)
+  DATA >0555  
+  DATA >06A0         BL @CPLP
+  DATA >1B3C  
+  DATA >100F         JMP RUN        * jump over the copy loop to go idle at the run block
+  DATA >C0F0         MOV *R0+,R3    * copy word 0A BB
+  DATA >C130         MOV *R0+,R4    * copy word 0C DD
+  DATA >C143         MOV R3,R5      * setup work register
+  DATA >0A45         SLA R5,4       * Shift up 'A'
+  DATA >0245         ANDI R5,>F000  * mask
+  DATA >F000  
+  DATA >F144         SOCB R4,R5     * get 'C'
+  DATA >DC45         MOVB R5,*R1+   * output 'AC'
+  DATA >06C3         SWPB R3        * prepare 'BB'
+  DATA >DC43         MOVB R3,*R1+
+  DATA >06C4         SWPB R4        * prepare 'DD'
+  DATA >DC44         MOVB R4,*R1+
+  DATA >0602         DEC R2         * count down
+  DATA >16F2         JNE CPLP       * continue till finished
+  DATA >045B         B *R11         * return
+  DATA >0340         IDLE           * go back to sleep - CPU must wake up us again
+  DATA >04C5         CLR R5         * just make sure the LSB is blank
+  DATA >0206         LI R6,>1FFF    * end of first block (unused byte)
+  DATA >1FFF  
+  DATA >0207         LI R7,>47FF    * end of second block (unused byte)
+  DATA >47FF  
+  DATA >0208         LI R8,>1DFE    * start of first block
+  DATA >1DFE  
+  DATA >0209         LI R9,>3800    * start of second block
+  DATA >3800  
+  DATA >020A         LI R10,>5000   * address of palette table
+  DATA >5000  
+  DATA >020C         LI R12,>F000   * a mask ('A')
+  DATA >F000  
+  DATA >020D         LI R13,>FF00   * compare value for scanline 255
+  DATA >FF00  
+  DATA >020E         LI R14,>7000   * address of scanline index
+  DATA >7000  
+  DATA >978D         CB R13,*R14    * check whether we are on line 255 yet (it repeats through line 262)
+GIDLE1  
+  DATA >16FE         JNE RUNLP
+  DATA >C108         MOV R8,R4      * reset current palette table address
+  DATA >C15E         MOV *R14,R5    * gets scanline and blanking bit
+  DATA >2160         COC @BLANK,R5  * this will match immediately during vblank, that's okay :)
+  DATA >1BD4  
+  DATA >16FC         JNE SCANW1
+  DATA >2AA0         XOR @PALOFF,R10 * Next palette register offset
+  DATA >1BD2  
+  DATA >22A0         COC @PALOFF,R10 * test the result equal to 5020? (too bad it wasn't 0/not 0)
+  DATA >1BD2  
+  DATA >1302         JEQ PAL2        * palette 2 is set
+  DATA >04C0         CLR R0          * Palette 1 (sets sprites as well)
+  DATA >1002         JMP PALCOM
+  DATA >0200         LI R0,>0100     * second palette
+  DATA >0100  
+  DATA >D800         MOVB R0,@>6018  * VDP register >18
+  DATA >6018  
+  DATA >0203         LI R3,8         * 16 entries to copy / 2
+  DATA >0008  
+  DATA >C3CA         MOV R10,R15     * palette table address
+  DATA >D034         MOVB *R4+,R0    * 'Ac'
+  DATA >D074         MOVB *R4+,R1    * 'BB'
+  DATA >D0B4         MOVB *R4+,R2    * 'DD'
+  DATA >06C2         SWPB R2         * 00DD
+  DATA >D080         MOVB R0,R2      * ACDD
+  DATA >06C1         SWPB R1         * 00BB
+  DATA >0940         SRL R0,4        * 0ACx
+  DATA >D040         MOVB R0,R1      * 0ABB
+  DATA >CFC1         MOV R1,*R15+    * write 0ABB    
+  DATA >CFC2         MOV R2,*R15+    * write 0CDD
+  DATA >8184         C R4,R6         * check for first table finished
+  DATA >1602         JNE FIRSTB
+  DATA >C109         MOV R9,R4       * yes, load second table
+  DATA >1002         JMP NEXTCOL
+  DATA >81C4         C R4,R7         * check for second table finished (split into 2 loops could avoid the double test)
+  DATA >14DB         JHE RUNLP       * yes, wait for new frame
+  DATA >0603         DEC R3
+  DATA >16EE         JNE SCANL1      * loop around for more
+  DATA >915E         CB *R14,R5      * wait for the scanline to change
+  DATA >16DA         JNE SCANW1      * it changed, get to work immediately!
+  DATA >10FD         JMP NEXTLIN     * not changed, keep waiting
+  DATA >0020         DATA >0020      * XORd value for the alternate palette address
+  DATA >0001         DATA >0001      * value of the blank bit (note it's always set in vblank)
+PROGEND	
+
+PALT
+* default F18 palette values
+	DATA >0000,>0000,>02C3,>05D6,>054F,>076F,>0D54,>04EF
+	DATA >0F54,>0F76,>0DC3,>0ED6,>02B2,>0C5C,>0CCC,>0FFF
+	
+* PAB Layout - must be copied to VDP RAM
+* OpCode (5=load), ErrFlag
+* VDP Buffer address
+* Record Length, character count
+* File Size
+* Bias, Name length
+* Name	
+PAB  DATA >0500,>0000,>0000,>1800,>000D
+     TEXT 'DSK1.P00_TIAP '
+
+* the lazy way to draw a text screen...       
+MENU       
+	TEXT '                                        '
+	TEXT 'Press:                                  '
+	TEXT '                                        '
+	TEXT '  1) for 9918A Bitmap                   '
+	TEXT '                                        '
+	TEXT '  2) for 9918 Multicolor                '
+	TEXT '                                        '
+	TEXT '  3) for 9918 dual-multicolor (flicker) '
+	TEXT '                                        '
+	TEXT '  4) for 9918A half-multicolor (flicker)'
+	TEXT '                                        '
+	TEXT '  5) for F18A paletted bitmap           '
+	TEXT '                                        '
+	TEXT '  6) for F18A scanline palette bitmap   '
+	TEXT '                                        '
+	TEXT '  7) for continuous random              '
+	TEXT '                                        '
+	TEXT '                                        '
+	TEXT '  FCTN = to QUIT                        '
+	TEXT '  Press SPACE for next image            '
+	TEXT '  Hold FCTN-9 to return to menu         '
+	TEXT '  Hold SHIFT to override F18A Test      '
+	TEXT '                                        '
+	TEXT '                                        '
+
+* Table for converting 0-59 to BCD 1-60
+BCD 
+	DATA >0102,>0304,>0506,>0708,>0910
+	DATA >1112,>1314,>1516,>1718,>1920
+	DATA >2122,>2324,>2526,>2728,>2930
+	DATA >3132,>3334,>3536,>3738,>3940
+	DATA >4142,>4344,>4546,>4748,>4950
+	DATA >5152,>5354,>5556,>5758,>5960
+
+* registers for bitmap (and 5A00 is the address of the sprite table)
+* background is transparent (the only color never redefined)
+* PDT - >0000
+* SIT - >1800
+* SDT - >1800
+* CT  - >2000
+* SAL - >1B00
+BMREGS DATA >81A0,>8002,>8206,>83ff,>8403,>8536,>8603,>8700,>5B00,>0000
+
+* registers for 40-col text mode - EA settings
+* PDT - >0800
+* SIT - >0000
+* SDT - >0000
+* CT  - >0380
+* SAL - >0300 (sprites are disabled but the function needs it anyway)
+TXREGS DATA >81A0,>8000,>8200,>830E,>8401,>8506,>8600,>87F5,>4300,>0000
+
+* registers for multicolor (and 5A00 is the address of the sprite table)
+* background is transparent
+* SIT - >0000 - >0300
+* CT  - >0000 (not used)
+* PDT - >0800 - >1000
+* SAL - >1B00 - >1B1F
+* SDT - >2000 - >2800
+MLREGS DATA >81A0,>8000,>8200,>8300,>8401,>8536,>8604,>8700,>5B00,>0000
+
+* registers for half-multicolor (sprites at >3B00)
+HMREGS DATA >81A0,>8002,>820E,>83FF,>8403,>8576,>8707,>8700,>7B00,>0000
+
+* HERE WE GO	
+START
+	LWPI >8300
+	BL @RESTF18			* reset the F18 if present and active
+	LI R1,TXREGS
+	BL @LOADRG			* set text mode
+	BL @CHARSET			* load character set from GROM
+	LI R0,>F000
+	BL @SETR1
+	
+* Check random seed
+	MOV @RNDSED,R0
+	JNE CHKVDP
+	MOV @>83C0,@RNDSED
+	JNE CHKVDP
+	INC @RNDSED
+CHKVDP	
+	
+* Check VDR DSR space
+	MOV @VDPBAD,R0
+	JNE STREST
+* it's okay, so make a copy of it
+	BL @FILES			* make sure only 1 file
+	LI R0,>3BDC
+	LI R1,DSRBUF
+	LI R2,1060
+	BL @VMBR
+	JMP STOK
+STREST	
+* It's bad, restore it
+	LI R0,>3BDC
+	LI R1,DSRBUF
+	LI R2,1060
+	BL @VMBW
+	CLR @VDPBAD
+STOK
+	
+	CLR R0
+	LI R1,MENU
+	LI R2,960
+	BL @VMBW			* draw the menu
+	
+	CLR @INTFTN			* remove any old interrupt callback
+	CLR @ONESHOT		* Clear one-shot random mode
+	
+MENULP
+* This quit test copied from the console ROM
+	LI 12,>0024 			* Load CRU
+	LDCR @>0012,3
+	SRC 12,7				* delay
+	LI 12,>0006
+	STCR 5,8 				* Fetch CRU
+	CZC @QUITK,5 			* QUIT key?
+	JNE MENUKY
+	B @REBOOT				* reboot if yes
+	
+	BL @RAND				* scramble random numbers
+
+MENUKY
+	BL @KSCAN
+	CLR R1
+	MOVB @>8375,R1
+	CI R1,>3100
+	JNE M1
+	B @MODE1
+M1
+	CI R1,>3200
+	JNE M2
+	B @MODE2
+M2
+	CI R1,>3300
+	JNE M3
+	B @MODE3
+M3
+	CI R1,>3400
+	JNE M4
+	B @MODE4
+M4	
+	CI R1,>3500
+	JNE M5
+	B @MODE5
+M5	
+	CI R1,>3600
+	JNE M6
+	B @MODE6
+M6	
+	CI R1,>3700
+	JNE M7
+	B @MODE7
+	
+M7
+	CI R1,>2500			* '%' = Shift-5
+	JNE M8
+	B @MODE5O
+	
+M8
+	CI R1,>5E00			* '^' = shift-6
+	JNE M9
+	B @MODE6O
+	
+M9
+	CI R1,>2600			* '&' = shift-7
+	JNE MENULP
+	B @MODE7O
+	
+* 1) for 9918A Bitmap                   
+MODE1
+	BL @BITMAP			* Set bitmap mode
+	MOV @COUNT1,R15		* image number! 20 images per disk
+	LI R14,1			* base disk number
+	
+MODE1L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+
+	BL @SETDSK
+	CLR R0
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	LI R0,>2000
+	MOV R15,R1
+	LI R2,>4300			* 'C'
+	BL @LOAD
+	
+	LI R0,>E200
+	BL @SETR1			* enable display
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT1		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE1L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT1
+	B @START			* yes
+
+* 2) for 9918 Multicolor                
+MODE2
+	BL @MULTIC			* Set multicolor mode
+	MOV @COUNT2,R15		* image number! 20 images per disk
+	LI R14,4			* base disk number
+	
+MODE2L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+
+	BL @SETDSK
+	LI R0,>0800
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	LI R0,>EA00
+	BL @SETR1			* enable display
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT2		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE2L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT2
+	B @START			* yes
+
+* 3) for 9918 dual-multicolor (flicker) 
+MODE3
+	BL @MULTIC			* Set multicolor mode
+	MOV @COUNT3,R15		* image number! 20 images per disk
+	LI R14,7			* base disk number
+	
+MODE3L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+
+	BL @SETDSK
+	LI R0,>0800
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	LI R0,>1000
+	MOV R15,R1
+	LI R2,>4300			* 'C'
+	BL @LOAD
+	
+	LI R1,MODE3I
+	MOV R1,@INTFTN
+
+	LI R0,>EA00
+	BL @SETR1			* enable display
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT3		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE3L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT3
+	B @START			* yes
+	
+MODE3I
+	MOV @FLAG,R0
+	JNE INTR32
+	SETO @FLAG
+	LI R0,>8402
+	B @VDPWA		* let it return
+INTR32
+	CLR @FLAG
+	LI R0,>8401
+	B @VDPWA		* let it return
+
+* 4) for 9918A half-multicolor (flicker)
+MODE4
+	BL @HALFM			* Set half-multicolor mode
+	MOV @COUNT4,R15		* image number! 20 images per disk
+	LI R14,10			* base disk number
+	
+MODE4L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+
+	BL @SETDSK
+	CLR R0
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	LI R0,>2000
+	MOV R15,R1
+	LI R2,>4300			* 'C'
+	BL @LOAD
+	
+	LI R0,>1800
+	MOV R15,R1
+	LI R2,>4D00			* 'M'
+	BL @LOAD
+	
+	LI R1,MODE4I
+	MOV R1,@INTFTN
+
+* We don't enable the display here because the interrupt routine toggles VDP R1 anyway
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT4		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE4L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT4
+	B @START			* yes
+	
+MODE4I
+	MOV @FLAG,R0
+	JNE INTR42
+	SETO @FLAG
+	
+	MOV R11,R1
+	LI R0,>8000
+	BL @VDPWA
+	MOV R1,R11
+	LI R0,>81E8
+	B @VDPWA
+		
+INTR42
+	CLR @FLAG
+	
+	MOV R11,R1
+	LI R0,>8002
+	BL @VDPWA
+	MOV R1,R11
+	LI R0,>81E0
+	B @VDPWA
+	
+* 5) for F18A paletted bitmap           
+MODE5
+	LI R0,START
+	MOV R0,@SAVE2		* on failure, go back to start
+	BL @TESTF18			* make sure we HAVE an F18 (hold shift to skip)
+	
+MODE5O
+	BL @BITMAP			* Set bitmap mode
+	MOV @COUNT5,R15		* image number! 20 images per disk
+	LI R14,13			* base disk number
+
+MODE5L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+
+	BL @SETDSK
+	CLR R0
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	LI R0,>2000
+	MOV R15,R1
+	LI R2,>4300			* 'C'
+	BL @LOAD
+	
+	LI R0,>1C00
+	MOV R15,R1
+	LI R2,>4D00			* 'M'
+	BL @LOAD
+	
+	LI R0,>1C00
+	LI R1,PALBUF
+	LI R2,32
+	BL @VMBR			* copy palette to CPU RAM
+	
+	LI R1,PALBUF
+	BL @LOADPAL			* load palette to F18
+	
+	LI R0,>E200
+	BL @SETR1			* enable display
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT5		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE5L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT5
+	B @START			* yes
+
+* 6) for F18A scanline palette bitmap   
+MODE6
+	LI R0,START
+	MOV R0,@SAVE2		* on failure, go back to start
+	BL @TESTF18			* make sure we HAVE an F18 (hold shift to skip)
+	
+MODE6O
+	BL @BITMAP			* Set bitmap mode
+	MOV @COUNT6,R15		* image number! 20 images per disk
+	LI R14,16			* base disk number
+
+MODE6L
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+	LI R0,>B800			* stop the GPU
+	BL @VDPWA
+	
+	MOV @VDPBAD,R0		* is VDP DSR space corrupt?
+	JEQ MODE6V
+	
+	LI R0,>3BDC
+	LI R1,DSRBUF
+	LI R2,1060
+	BL @VMBW			* yes, restore it
+	
+MODE6V
+	
+* there's a small problem here that we destroy the disk buffers with our
+* image data (there MAY be a way to arrange it all to fit, but it's tight)
+* we have to first load EVERYTHING, then backup the DSR, then we can
+* destroy the data there. This method doesn't allow much concurrency.
+	BL @SETDSK
+
+* first load the pattern table and back up in CPU RAM
+	CLR R0
+	MOV R15,R1
+	LI R2,>5000			* 'P'
+	BL @LOAD
+	
+	CLR R0
+	LI R1,PATBUF
+	LI R2,6144
+	BL @VMBR
+
+* now load the color table into place
+	LI R0,>2000
+	MOV R15,R1
+	LI R2,>4300			* 'C'
+	BL @LOAD
+
+* finally, load the palette data (in the pattern table address)		
+	CLR R0
+	MOV R15,R1
+	LI R2,>4D00			* 'M'
+	BL @LOAD
+	
+* Get the GPU code into VDP as well
+	LI R0,PROGLD		* load address of code
+	LI R1,PROG			* code itself
+	LI R2,PROGEND-PROG	* number of bytes
+	BL @VMBW
+	
+* Now start it running
+	LI R0,>B61B			* MSB
+	BL @VDPWA
+	LI R0,>B720			* LSB
+	BL @VDPWA
+	
+* GPU is now working on the palette. We'll copy in the
+* pattern table at the same time. Although it's the same
+* buffer, the GPU is WAY faster and should be way ahead
+* of us by the time we get to the first word.
+	CLR R0
+	LI R1,PATBUF
+	LI R2,6144
+	BL @VMBW
+	
+* Set the special flag for the main code to restore
+* the VDP buffer!
+	SETO @VDPBAD
+
+* GPU should be idling, so just wake it up
+	LI R0,>B801
+	BL @VDPWA
+		
+	LI R0,>E200
+	BL @SETR1			* enable display
+	
+	BL @DELAY			* wait 10 seconds (with return to menu)
+	
+	BL @BCDINC			* next image
+	MOV R15,@COUNT6		* save it
+	CI R15,>0061		* are we done?
+	JNE MODE6L			* no!
+	
+	LI R15,>0001
+	MOV R15,@COUNT6
+	B @START			* yes
+
+* 7) for continuous random              
+MODE7
+* WE OWN R7! Muhaha! We use it to store the max picture index, based on F18 support
+	LI R7,240			* assume no F18A - 240 pics available
+	LI R0,MODE72
+	MOV R0,@SAVE2		* jump over change if it's not there
+	BL @TESTF18
+
+MODE7O
+	LI R7,360			* it IS real!! - 360 pics available
+
+* Here we just run forever - we pick a random image
+MODE72
+	LI R0,>81A0
+	BL @VDPWA			* clear display (no need for SetR1 here)
+	BL @RESTF18			* and reset the F18
+
+	MOV @VDPBAD,R0		* is VDP DSR space corrupt?
+	JEQ MODE7V
+	
+	LI R0,>3BDC
+	LI R1,DSRBUF
+	LI R2,1060
+	BL @VMBW			* yes, restore it
+	CLR @VDPBAD
+
+MODE7V
+	CLR @INTFTN			* remove any old interrupt function
+	BL @RAND			* get randomish number into R1
+	CLR R0				* extend to 32-bits
+	DIV R7,R0			* divide by the number of desired pics, R1 gets remainder
+	
+* The picture number is in R1, so now divide again to get the group and file number
+* the groups themselves deal with the actual disk division
+	LI R2,60			* sixty pics per group
+	CLR R0				* just picture number
+	DIV R2,R0			* R0 gets group, R1 gets image in that group
+	MOVB @BCD(R1),R1	* Hah! Hacky lookup from hex->BCD
+	SRL R1,8
+	MOV R0,R2			* R0 can't be an index register
+	SLA R2,1			* multiply by 2 for word index
+	MOV R1,@COUNT1(R2)	* Store image number in the appropriate3 group
+	MOV @TABLE(R2),R0	* get jump address
+	SETO @ONESHOT		* flag a one-shot load
+	B *R0				* go do it! they will come back here
+
+SLAST
+
+* Empty buffers that are not saved with the program
+SAVE  BSS 2	
+SAVE2 BSS 2
+FLAG  BSS 2
+INTFTN BSS 2
+ONESHOT BSS 2
+RNDSED BSS 2
+PALBUF BSS 32
+PATBUF BSS 6144
+DSRBUF BSS 1060
+NAMBUF BSS 8
+	END
+
