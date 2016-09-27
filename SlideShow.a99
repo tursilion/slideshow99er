@@ -28,6 +28,18 @@
 * One nice thing is I can probably reuse some of this for my music player...
 * just define the ROM as yet another file device. I don't think I'll do that here.
 *
+*// PAB struct
+*struct __attribute__((__packed__)) PAB {
+*	unsigned char OpCode;			// see DSR_xxx list above
+*	unsigned char Status;			// file type and error code (DSR_ERR_xxx and DSR_TYPE_xxx)
+*	unsigned int  VDPBuffer;		// address of the data buffer in VDP memory
+*	unsigned char RecordLength;		// size of records. Not used for PROGRAM type. >00 on open means autodetect
+*	unsigned char CharCount;		// number of bytes read or number of bytes to write
+*	unsigned int  RecordNumber;		// record number for normal files, available bytes (LOAD or SAVE) for PROGRAM type
+*	unsigned char ScreenOffset;		// Used in BASIC for screen BIAS. Also returns file status on Status call. (DSR_STATUS_xxx)
+*	unsigned char NameLength;		// for this implementation only, set to zero to read the length from the string
+*	unsigned char *pName;			// for this implementation only, must be a valid C String even if length is set
+*};
 
 	DEF START,SFIRST,SLAST,SLOAD
 	
@@ -992,10 +1004,10 @@ TXTPTH
 	TEXT 'Path: ~'
 	EVEN
 TXTCNT
-	TEXT ' files found~'
+	TEXT ' images found~'
 	EVEN
 TXTNOC
-	TEXT 'No files found!~'
+	TEXT 'No images found!~'
 	EVEN
 TXTDEL
 	TEXT 'Delay (s): ~'
@@ -1052,11 +1064,12 @@ prnlp
 	mov r1,r1
 	jeq pn1
 	seto r3
+	swpb r1
 	ai r1,>3000
 	movb r1,@>8c00
 pn1
 	clr r1
-	li r0,>1000
+	li r0,1000
 	div r0,r1
 	mov r3,r3
 	jne pn2
@@ -1064,12 +1077,13 @@ pn1
 	jeq pn3
 pn2
 	seto r3
+	swpb r1
 	ai r1,>3000
 	movb r1,@>8c00
 
 pn3
 	clr r1
-	li r0,>100
+	li r0,100
 	div r0,r1
 	mov r3,r3
 	jne pn4
@@ -1077,12 +1091,13 @@ pn3
 	jeq pn5
 pn4
 	seto r3
+	swpb r1
 	ai r1,>3000
 	movb r1,@>8c00
 
 pn5
 	clr r1
-	li r0,>10
+	li r0,10
 	div r0,r1
 	mov r3,r3
 	jne pn6
@@ -1090,10 +1105,12 @@ pn5
 	jeq pn7
 pn6
 	seto r3
+	swpb r1
 	ai r1,>3000
 	movb r1,@>8c00
 
 pn7
+	swpb r2
 	ai r2,>3000
 	movb r2,@>8c00
 	B *R11
@@ -1334,7 +1351,7 @@ catloop
 	li r0,>1000
 	li r1,recordbuf
 	clr r2
-	movb @PAB+5,r2		* get read bytes count from PAB copy
+	movb @PAB+5,r2		* get read bytes count from PAB copy (note: fixed records, always FE)
 	swpb r2
 	bl @vmbr					* read the record
 	
@@ -1364,22 +1381,22 @@ catloop
 	movb *r0+,r1
 	swpb r1
 	movb *r0+,r1					* get number, either
-	ci r0,>0540						* PROGRAM file
+	ci r1,>0540						* PROGRAM file
 	jeq gotprog
-	ci r0,>fbbf						* protected PROGRAM file
+	ci r1,>fbbf						* protected PROGRAM file
 	jeq gotprog
 	
 * don't care about this file, so loop around
 	jmp catloop
 
 * got a program type file, so we need to check if it's an _P (that's all we count)	
-* r0 is already pointing after the filename, so we can backup 5 to check
+* r0 is already pointing after the filename, so we can backup 5 to check (_P)
 gotprog
 	ai r0,-5
 	movb *r0+,r1
 	swpb r1
 	movb *r0+,r1					* last two chars of filename (reversed)
-	ci r0,>505F						* P_ (remember, it's reversed)
+	ci r1,>505F						* P_ (remember, it's reversed)
 	jne catloop						* next record if not our style
 	
 * now we have found a file we want to consider, play with the counters
@@ -1389,7 +1406,7 @@ gotprog
 	mov *r6,r1						* going to notify on the screen
 	bl @prnum
 catnoupdate
-	c *r6,r7							* are we done?
+	c *r6,r7							* are we done (ie: reached user-specified count, is zero if no limit)
 	jne catloop						* nope
 	
 * we are done, so copy the return value to r0
@@ -1486,10 +1503,10 @@ clrlp
 * that device, and counts how many pics are on it, saving and displaying the
 * count. It then asks again until you enter a blank entry.
 PATHLP
-	inc r13									* next entry
+	inc r13									* next entry (we increment even on empty drives to save sanity ;) )
 * print 'x Images Found'
 	mov @totcnt,r1
-	li r0,2
+	li r0,1
 	bl @prnum
 	li r1,txtimg
 	bl @prlp
@@ -1507,9 +1524,9 @@ PATHLP
 * (start address is INPUTBUF)
 	ai r0,6
 	bl @input
-	mov r0,r4				; save cursor address
+	mov r0,r4					; save cursor address
 	
-	ci r1,inputbuf
+	ci r1,inputbuf+2	; there is always a terminating ".~"
 	jeq endinput
 	
 * copy the input to the current input buffer
@@ -1538,14 +1555,20 @@ incplp
 	a r0,@totcnt		; update the total (no effect if it's zero)
 	mov r0,r0				; did we find any files?
 	jeq nofiles
-	inc r13					; save the record
-nofiles
+
 	mov r0,r1				; number
-	mov r2,r0				; screen address
+	mov r8,r0				; screen address (r2 lost, but catalog saved it in r8 ;) )
 	bl @prnum
 	li r1,txtcnt
 	bl @prlp
+	jmp fildone
 
+nofiles
+	mov r8,r0				; screen address from catalog
+	li r1,txtnoc
+	bl @print				; no files found
+
+fildone
 	ci r13,12				; at the end?
 	jeq endinput
 
@@ -1567,9 +1590,10 @@ endinput
 	bl @innum
 * convert it to a number
 	clr @DELTM
-	ci r1,INPUTBUF
+	ci r1,INPUTBUF+2
 	JEQ EIDONE
 	li r0,1
+	dect r1       * back over the .~ part
 eilp1	
 	dec r1
 	movb *r1,r2
