@@ -1,3 +1,6 @@
+** TODO: Flicker folder is not displaying Luna - why?
+** TODO: Test F18A modes
+
 * New slideshow
 *
 * Supported types:
@@ -59,16 +62,14 @@ VDPWADR EQU >8C02
 
 SLOAD
 SFIRST
-	B @START
+	LWPI >8300
+	BL @TESTF18					* test for the F18A first of all
+	B @START						* now go do the main code
 	
-COUNT1 DATA >0001
-COUNT2 DATA >0001
-COUNT3 DATA >0001
-COUNT4 DATA >0001
-COUNT5 DATA >0001
-COUNT6 DATA >0001
 VDPBAD DATA >0000
 DSRDAT DATA >2EAA
+BIT01  DATA >0001
+CURSOR DATA >F8F8,>F8F8,>F8F8,>F8F8
 
 *****
 **
@@ -94,6 +95,48 @@ FILES   MOV  R11,@SAVE
 *       Return
         MOV  @SAVE,R11
         B    *R11
+
+**
+* LOAD - called from the inline code 
+* R0 - VDP Address
+* R2 - character for end of filename (MSB)
+* Filename is in RECORDBUF+1, we just need to patch it and
+* fall through into WRAPLOAD.
+LOAD
+	CLR R1
+	MOVB @RECORDBUF,R1		* name length
+	SWPB R1
+	AI R1,RECORDBUF				* point to last character
+	MOVB R2,*R1+					* patch it
+	LI R3,>7e00						* need to ~ terminate
+	MOVB R3,*R1+
+
+* now we'll reuse lastmbuf - we need to build a fully qualified
+* filename including the disk device. The disk device should still
+* be loaded into workentry
+
+	LI R1,lastmbuf
+	li r3,workentry
+	clr r2
+LOADLP1
+  MOVB *r3+,r2
+  ci r2,>7e00
+  jeq loadlp2
+  movb r2,*r1+
+  jmp loadlp1
+loadlp2
+  li r3,RECORDBUF+1
+loadlp3
+  MOVB *r3+,r2
+  ci r2,>7e00
+  jeq loadlp4
+  movb r2,*r1+
+  jmp loadlp3
+loadlp4
+	LI R3,>7e00						* need to ~ terminate
+	MOVB R3,*R1+
+	LI R1,lastmbuf				* start of name
+* fall through to WRAPLOAD...
 
 **
 * WRAPLOAD - wraps an EA#5 load operation
@@ -140,12 +183,19 @@ WRAPOPENSHORT
 * WRAPCLOSE - wraps a DSR CLOSE
 * R1 - pointer to filename (~ terminated)
 * build a PAB
+* Note: CLOSE probably doesn't need the reclen and dsrrec, but Classic99 does ;)
 WRAPCLOSE
 	LI R2,pab
-	LI R3,>0001			* CLOSE (in LSB)
+	LI R3,>0001				* CLOSE (in LSB)
 	SOCB @RECMODE,R3	* get the opened record mode
 	SWPB R3
-	JMP OPENCOMMON
+	mov r3,*r2+
+	clr r3
+	mov r3,*r2+				* vdp buffer address
+	movb @RECLEN,R3		* note, on variable length data this returns actual bytes
+	mov r3,*r2+		
+	mov @DSRREC,*r2+ 	* record number
+	jmp wrapdsr
 	
 **
 * WRAPREAD - wraps a DSR READ on an open file
@@ -359,7 +409,7 @@ DJUMP5 LWPI DREGS
 DJUMP6 CLR  R1
 DJUMP7 SWPB R1
        MOVB R1,*R13
-       SOCB @HEX20,R15
+       SOCB @HEX20,@>837C
        RTWP
 *// DSRLNK
 
@@ -379,16 +429,23 @@ VSBR
 	B *R11
 
 **
-* VMBR - Read R2 bytes from VDP R0 to CPU R1	
+* VMBR - Read R2 bytes from VDP R0 to CPU R1 (must be even)
 * Destroys R1,R2
 VMBR
 	SWPB R0
 	MOVB R0,@>8C02
 	SWPB R0
 	MOVB R0,@>8C02
-VMBRLP
+	COC @BIT01,R2
+	JNE VMBRLP
 	MOVB @>8800,*R1+
 	DEC R2
+	JNE VMBRLP
+	B *R11
+VMBRLP
+	MOVB @>8800,*R1+
+	MOVB @>8800,*R1+
+	DECT R2
 	JNE VMBRLP
 	B *R11
 	
@@ -440,9 +497,16 @@ VMBW
 	MOVB R0,@>8C02
 	SWPB R0
 	MOVB R0,@>8C02
-VMBWLP
+	COC @BIT01,R2
+	JNE VMBWLP
 	MOVB *R1+,@>8C00
 	DEC R2
+	JNE VMBWLP
+	B *R11
+VMBWLP
+	MOVB *R1+,@>8C00
+	MOVB *R1+,@>8C00
+	DECT R2
 	JNE VMBWLP
 	B *R11
 	
@@ -648,41 +712,7 @@ MENUKY
 	B *R11
 	
 **
-* LOAD image to VRAM:
-* R0 - VRAM address
-* R1 - Image number (1-60 -- must be BCD! No hex!) TODO! NEEDS TO BE FILENAME
-* R2 - (MSB) P, M or C 
-LOAD
-	MOV R11,@SAVE2		* save return address
-	
-	MOV R0,@PAB+2			* patch load address
-	MOVB R2,@PAB+22		* patch filename last char
-	MOV R1,R0
-	ANDI R0,>00F0
-	SRL R0,4
-	AI R0,>0030
-	SWPB R0
-	ANDI R1,>000F
-	AI R1,>0030
-	SWPB R1
-	MOVB R0,@PAB+16
-	MOVB R1,@PAB+17		* patch filename number
-	LI R0,>0500
-	MOVB R0,@PAB			* patch opcode
-	LI R0,PABADR
-	LI R1,PAB
-	LI R2,24
-	BL @VMBW					* write the PAB
-	LI R0,PABADR
-
-	BLWP @DSRLNK
-	DATA 8
-	
-	MOV @SAVE2,R11
-	B *R11
-	
-**
-* DELAY for DELTM seconds with both QUIT and Enter/Space detection
+* DELAY for DELTM seconds with both QUIT and Space detection
 * does it internally for the sake of the F18A versions
 DELAY
 	MOV R11,@SAVE2
@@ -775,6 +805,11 @@ SETR1
 * RESTF18 - Reset the palette and GPU on the F18 (no harm if not F18, 
 * but expect registers to be messed up)	
 RESTF18
+	MOV @F18YES,R0		* do nothing if no F18A
+	JNE RESTG18	
+	B *R11
+
+RESTG18	
 	MOV R11,@SAVE2
 	
 * stop the GPU and then Reset (no harm if it's not F18)
@@ -1229,6 +1264,15 @@ inbacksp
 INYESNO
   MOV R11,R10
 	ORI R0,>4000
+
+inynlp2
+* wait for key release
+  clr r2
+	bl @kscan
+	movb @>8375,r2
+	ci r2,>ff00
+	jne inynlp2
+
 	li r1,INPUTBUF
 inynlp
 	SWPB R0
@@ -1307,6 +1351,9 @@ inno
 *
 CATALOG
 	MOV R11,R9
+	
+* in case we see no M's
+	CLR @LASTMBUF
 
 * save off the input data in R6,7,8
 	MOV R0,R6				R6 - device buffer count
@@ -1389,10 +1436,28 @@ catloop
 * don't care about this file, so loop around
 	jmp catloop
 
-* got a program type file, so we need to check if it's an _P (that's all we count)	
-* r0 is already pointing after the filename, so we can backup 5 to check (_P)
 gotprog
+* before we check for the _P, we check if it's an _M. M comes before P, so we can
+* save off the file size data for comparison use later if we find a match
+* r0 is already pointing after the filename, so we can backup 5 to check (_P)
 	ai r0,-5
+	movb *r0+,r1
+	swpb r1
+	movb *r0+,r1					* last two chars of filename (reversed)
+	ci r1,>4D5F						* M_ (remember, it's reversed)
+	JNE checkP
+	
+* copy the buffer to lastmbuf - I don't want to mess with a lot of registers, so slowish...
+	li r1,>0100
+gotplp
+	mov @recordbuf(r1),@lastmbuf(r1)
+	dect r1
+	joc gotplp
+
+* got a program type file, so we need to check if it's an _P (that's all we count)
+* now we just need to back up 2
+checkP
+	ai r0,-2
 	movb *r0+,r1
 	swpb r1
 	movb *r0+,r1					* last two chars of filename (reversed)
@@ -1448,6 +1513,10 @@ START
 	LI R1,TXREGS
 	BL @LOADRG			* set text mode
 	BL @CHARSET			* load character set from GROM
+	LI R0,>8F0
+	LI R1,CURSOR
+	LI R2,8
+	BL @VMBW				* redefine the cursor
 	LI R0,>F000
 	BL @SETR1
 	
@@ -1479,7 +1548,6 @@ STREST
 STOK
 
 	CLR @INTFTN			* remove any old interrupt callback
-	CLR @ONESHOT		* Clear one-shot random mode
 
 * clear the screen
 	CLR R0
@@ -1489,7 +1557,7 @@ STOK
 
 * clear the data
 	li r0,entries
-	li r2,262
+	li r2,240
 clrlp
 	clr *r0+
 	dect r2
@@ -1569,7 +1637,7 @@ nofiles
 	bl @print				; no files found
 
 fildone
-	ci r13,12				; at the end?
+	ci r13,11				; was the last buffer?
 	jeq endinput
 
 	jmp pathlp
@@ -1653,256 +1721,228 @@ notrnd
 	seto @loop
 notloop
 
-*** TODO: infinite loop for debugging
-	jmp notloop
-	
-*-------------------------------------------------------------------------
-*(here)
-
-* Then it starts. We have a list of devices and how many files are
-* on each so that we can work out which device to access for each file
-* (this way it works both sequential and random). On the device, the catalog
-* is scanned to find the file by count (remember to count only _P files),
-* and then the file is loaded and displayed.
-* In memory, we maintain a simple list of 18 character device names and
-* a count of files on that device. A blank character device name will
-* indicate the last entry in the list, and we'll have a max of say 12 devices,
-* it's only 20 bytes per entry. (With 12 I don't need to scroll the screen).
-* Detection of filetype is dynamic and based on the _M file length. TIAP
-* loader needs to also recognize a file with no color table, and load a
-* default one for that.
-*
-* 47 Images found. Enter blank path to start.
-*
-* Path: WSD1.SUBDIR1 - 17 files found
-* Path: DSK1 - 8 files found
-* Path: HDX1 - 22 files found
-* Path: CLOCK - No files found!
-* Path:
-*
-* Delay (s): 10
-* Random? Y/N: Yes
-* Loop? Y/N: Yes
 *
 * Press Back to restart or Space to begin
 *
+	mov r13,r0
+	li r1,40
+	mpy r1,r0		; result in r0,r1
+	mov r1,r0
+	ai r0,320
+	li r1,txtbeg
+	bl @print
+	
+stlop
+	bl @kscan
+	clr r0
+	movb @>8375,r0
+	ci r0,>2000		* space bar
+	jeq goforit
+	ci r0,>0F00		* back
+	jne stlop
+	b @start
+	
+*
+* We are going to go ahead now and start showing pics
+* this is based on the old random show, except it's not
+* always random now ;)
+*	
+* 7) for continuous random
+goforit
+	seto @count1		* first image (-1 for upcoming increment)
+	mov @totcnt,@count2		* countdown to end of loop, if not looping
+	jne goforlpx
+	b @start				* no images to run!
 
-** dummy labels
-SETDSK
-BCDINC
-MULTIC
-BCD
-TABLE
-		
-MENULP
-	BL @KSCAN
-	CLR R1
-	MOVB @>8375,R1
-	CI R1,>3100
-	JNE M1
-	B @MODE1
-M1
-	CI R1,>3200
-	JNE M2
-	B @MODE2
-M2
-	CI R1,>3300
-	JNE M3
-	B @MODE3
-M3
-	CI R1,>3400
-	JNE M4
-	B @MODE4
-M4	
-	CI R1,>3500
-	JNE M5
-	B @MODE5
-M5	
-	CI R1,>3600
-	JNE M6
-	B @MODE6
-M6	
-	CI R1,>3700
-	JNE M7
-	B @MODE7
+goforlpx
+	inc @count2			* for the upcoming pre-decrement
+
+goforlp
+	inc @count1				* next image (if sequential)
+	C @count1,@totcnt	* done?
+	jne notattot
+	clr @count1				* zero if so
+
+notattot
+	mov @loop,r0
+	jne notdonego		* we are looping, don't count down
+
+	dec @count2			* count down
+	jne notdonego
+	b @start				* all done
 	
-M7
-	CI R1,>2500			* '%' = Shift-5
-	JNE M8
-	B @MODE5O
+notdonego
+	LI R0,>81A0
+	BL @VDPWA				* clear display (no need for SetR1 here)
+	CLR @INTFTN			* remove any old interrupt function
+	BL @RESTF18			* and reset the F18
+
+	MOV @VDPBAD,R0	* is VDP DSR space corrupt?
+	JEQ MODE7V
 	
-M8
-	CI R1,>5E00			* '^' = shift-6
-	JNE M9
-	B @MODE6O
+	LI R0,>3BDC
+	LI R1,DSRBUF
+	LI R2,1060
+	BL @VMBW				* yes, restore it
+	CLR @VDPBAD
+
+MODE7V
+	MOV @COUNT1,R1	* get next image index into R1
+	MOV @RANDOM,R0	* random?
+	JEQ norand
+	BL @RAND				* get randomish number into R1
+norand
+	CLR R0					* extend to 32-bits
+	MOV @TOTCNT,R7	* total count of pics
+	DIV R7,R0				* divide, R1 gets remainder (picture index)
 	
-M9
-	CI R1,>2600			* '&' = shift-7
-	JNE MENULP
-	B @MODE7O
+	li r0,entries+18	* got to work out which device the pic is on
+searchlp
+	mov *r0,r2
+	c r1,r2					* which is bigger?
+	jl foundit
+	s r2,r1					* count down
+	ai r0,20				* next entry
+	ci r0,entries+258	* at the end?
+	jl searchlp
+	b @start				* give up - this shouldn't happen...
 	
+* r1 contains the index on the current device
+* r0 contains the device entry (pointer to count)
+* Need to copy entry to workentry and give that to catalog instead
+foundit
+	ai r0,-18
+	li r3,workentry
+	li r2,18
+fonitlp
+	mov *r0+,*r3+
+	dect r2
+	jne fonitlp
+	clr *r3					* count needs to be zero
+	mov r3,r0				* point to workentry instead
+  inc r1					* catalog function is 1-based, 0 means no limit
+	clr r2					* no VDP counting during search
+	bl @catalog
+	mov @dsrerr,r0	* check for error
+	jeq foundok
+	b @start				* something went wrong
+
+* now the file information is in recordbuf, and if applicable,
+* the _M file data is in lastMbuf (need to verify that lastMBuf
+* is for the same file, though)
+foundok
+	clr r7					* will eventually contain the file size
+	clr r1
+	movb @lastmbuf,r1
+	jeq gotmsize		* no data
+	swpb r1					* filename length - but there's a 1 byte offset
+	dec r1
+foklp
+	cb @lastmbuf(r1),@recordbuf(r1)
+	jne gotmsize		* not the same file
+	dec r1
+	joc foklp				* counts down including the length byte
+	
+* okay, the filenames match, so it counts. We need to parse the number of sectors
+* So our detection truth table - try to load the 'M' file, and:
+* 0/Error - TI Artist+ (color or mono) - MODE1
+* 9 (08 40 09) - Half Multicolor - MODE4
+* 2 (08 40 02) - Paletted Bitmap - MODE5
+* 25(08 40 1A) - scanline paletted bitmap - MODE6
+* we cheat again, just the first 3 bytes of the floating point number
+* remember the filename length is variable...
+  clr r1
+  movb @lastmbuf,r1		* name length
+  swpb r1							* as number
+  ai r1,lastmbuf+10		* 1 for name length, 8 for file type, 1 to start
+	movb *r1+,r2
+	swpb r2
+	movb *r1+,r2
+	ci r2,>4008
+	jne gotmsize		* not a good number
+	movb *r1,r7
+	swpb r7					* r7's got it now
+	
+* Now, just jump to the right function!
+gotmsize
+	mov r7,r7
+	jne gotm2
+	bl @MODE1
+	b @goforlp
+	
+gotm2
+	ci r7,>0009
+	jne gotm3
+	bl @MODE4
+	b @goforlp
+	
+gotm3
+	ci r7,>0002
+	jne gotm4
+	bl @MODE5
+	b @goforlp
+	
+gotm4
+	ci r7,>001A
+	jne gotm5				* something unknown got in there...
+	bl @MODE6
+gotm5
+	b @goforlp
+
+
 * 1) for 9918A Bitmap                   
 MODE1
-	BL @BITMAP			* Set bitmap mode
-	MOV @COUNT1,R15		* image number! 20 images per disk
-	LI R14,1			* base disk number
-	
-MODE1L
+	MOV R11,@POSTPIC
+	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-
-	BL @SETDSK
+	BL @VDPWA					* clear display (no need for SetR1 here)
 	CLR R0
-	MOV R15,R1
-	LI R2,>5000			* 'P'
+	LI R2,>5000				* 'P'
 	BL @LOAD
-	
 	LI R0,>2000
-	MOV R15,R1
-	LI R2,>4300			* 'C'
+	LI R2,>4300				* 'C'
 	BL @LOAD
-	
+	MOV @DSRERR,R0		* check for no color table (any error here)
+	JEQ MODE1COL			* jump if okay
+	LI R0,>2000
+	LI R1,>1E00
+	LI R2,>1800
+	BL @VMBS					* set color table to black on grey (sharper than black on white on composite video)
+MODE1COL	
 	LI R0,>E200
-	BL @SETR1			* enable display
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT1		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE1L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT1
-	B @START			* yes
-
-* 2) for 9918 Multicolor                
-MODE2
-	BL @MULTIC			* Set multicolor mode
-	MOV @COUNT2,R15		* image number! 20 images per disk
-	LI R14,4			* base disk number
-	
-MODE2L
-	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-
-	BL @SETDSK
-	LI R0,>0800
-	MOV R15,R1
-	LI R2,>5000			* 'P'
-	BL @LOAD
-	
-	LI R0,>EA00
-	BL @SETR1			* enable display
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT2		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE2L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT2
-	B @START			* yes
-
-* 3) for 9918 dual-multicolor (flicker) 
-MODE3
-	BL @MULTIC			* Set multicolor mode
-	MOV @COUNT3,R15		* image number! 20 images per disk
-	LI R14,7			* base disk number
-	
-MODE3L
-	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-
-	BL @SETDSK
-	LI R0,>0800
-	MOV R15,R1
-	LI R2,>5000			* 'P'
-	BL @LOAD
-	
-	LI R0,>1000
-	MOV R15,R1
-	LI R2,>4300			* 'C'
-	BL @LOAD
-	
-	LI R1,MODE3I
-	MOV R1,@INTFTN
-
-	LI R0,>EA00
-	BL @SETR1			* enable display
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT3		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE3L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT3
-	B @START			* yes
-	
-MODE3I
-	MOV @FLAG,R0
-	JNE INTR32
-	SETO @FLAG
-	LI R0,>8402
-	B @VDPWA		* let it return
-INTR32
-	CLR @FLAG
-	LI R0,>8401
-	B @VDPWA		* let it return
+	BL @SETR1					* enable display
+	BL @DELAY					* wait 10 seconds (with return to menu)
+	MOV @POSTPIC,R11
+	B *R11
 
 * 4) for 9918A half-multicolor (flicker)
 MODE4
-	BL @HALFM			* Set half-multicolor mode
-	MOV @COUNT4,R15		* image number! 20 images per disk
-	LI R14,10			* base disk number
-	
-MODE4L
+	MOV R11,@POSTPIC
+	BL @HALFM					* Set half-multicolor mode
 	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-
-	BL @SETDSK
+	BL @VDPWA					* clear display (no need for SetR1 here)
 	CLR R0
-	MOV R15,R1
-	LI R2,>5000			* 'P'
+	LI R2,>5000				* 'P'
 	BL @LOAD
-	
 	LI R0,>2000
-	MOV R15,R1
-	LI R2,>4300			* 'C'
+	LI R2,>4300				* 'C'
 	BL @LOAD
-	
 	LI R0,>1800
-	MOV R15,R1
-	LI R2,>4D00			* 'M'
+	LI R2,>4D00				* 'M'
 	BL @LOAD
-	
-	LI R1,MODE4I
+	LI R1,MODE4I			* set vertical blank interrupt handler
 	MOV R1,@INTFTN
-
 * We don't enable the display here because the interrupt routine toggles VDP R1 anyway
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT4		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE4L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT4
-	B @START			* yes
+	BL @DELAY					* wait 10 seconds (with return to menu)
+	MOV @POSTPIC,R11
+	B *R11
 	
 MODE4I
 	MOV @FLAG,R0
 	JNE INTR42
 	SETO @FLAG
 	
-	MOV R11,R1
+	MOV R11,R1				* turn on multicolor mode
 	LI R0,>8000
 	BL @VDPWA
 	MOV R1,R11
@@ -1912,7 +1952,7 @@ MODE4I
 INTR42
 	CLR @FLAG
 	
-	MOV R11,R1
+	MOV R11,R1				* turn on bitmap mode
 	LI R0,>8002
 	BL @VDPWA
 	MOV R1,R11
@@ -1921,125 +1961,77 @@ INTR42
 	
 * 5) for F18A paletted bitmap           
 MODE5
-	LI R0,START
-	MOV R0,@SAVE2		* on failure, go back to start
-	BL @TESTF18			* make sure we HAVE an F18 (hold shift to skip)
-	
-MODE5O
-	BL @BITMAP			* Set bitmap mode
-	MOV @COUNT5,R15		* image number! 20 images per disk
-	LI R14,13			* base disk number
-
-MODE5L
+	MOV @F18YES,R0
+	JNE MODE5OK
+	B *R11
+MODE5OK
+	MOV R11,@POSTPIC
+	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-
-	BL @SETDSK
+	BL @VDPWA					* clear display (no need for SetR1 here)
 	CLR R0
-	MOV R15,R1
-	LI R2,>5000			* 'P'
+	LI R2,>5000				* 'P'
 	BL @LOAD
-	
 	LI R0,>2000
-	MOV R15,R1
-	LI R2,>4300			* 'C'
+	LI R2,>4300				* 'C'
 	BL @LOAD
-	
 	LI R0,>1C00
-	MOV R15,R1
-	LI R2,>4D00			* 'M'
+	LI R2,>4D00				* 'M'
 	BL @LOAD
-	
 	LI R0,>1C00
 	LI R1,PALBUF
 	LI R2,32
-	BL @VMBR			* copy palette to CPU RAM
-	
+	BL @VMBR					* copy palette to CPU RAM
 	LI R1,PALBUF
-	BL @LOADPAL			* load palette to F18
-	
+	BL @LOADPAL				* load palette to F18
 	LI R0,>E200
-	BL @SETR1			* enable display
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT5		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE5L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT5
-	B @START			* yes
+	BL @SETR1					* enable display
+	BL @DELAY					* wait 10 seconds (with return to menu)
+	MOV @POSTPIC,R11
+	B *R11
 
 * 6) for F18A scanline palette bitmap   
 MODE6
-	LI R0,START
-	MOV R0,@SAVE2		* on failure, go back to start
-	BL @TESTF18			* make sure we HAVE an F18 (hold shift to skip)
-	
-MODE6O
-	BL @BITMAP			* Set bitmap mode
-	MOV @COUNT6,R15		* image number! 20 images per disk
-	LI R14,16			* base disk number
-
-MODE6L
+	MOV @F18YES,R0
+	JNE MODE6OK
+	B *R11
+MODE6OK
+	MOV R11,@POSTPIC
+	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-	LI R0,>B800			* stop the GPU
+	BL @VDPWA					* clear display (no need for SetR1 here)
+	LI R0,>B800				* stop the GPU
 	BL @VDPWA
-	
-	MOV @VDPBAD,R0		* is VDP DSR space corrupt?
-	JEQ MODE6V
-	
-	LI R0,>3BDC
-	LI R1,DSRBUF
-	LI R2,1060
-	BL @VMBW			* yes, restore it
-	
-MODE6V
-	
 * there's a small problem here that we destroy the disk buffers with our
 * image data (there MAY be a way to arrange it all to fit, but it's tight)
 * we have to first load EVERYTHING, then backup the DSR, then we can
 * destroy the data there. This method doesn't allow much concurrency.
-	BL @SETDSK
-
 * first load the pattern table and back up in CPU RAM
 	CLR R0
-	MOV R15,R1
-	LI R2,>5000			* 'P'
+	LI R2,>5000				* 'P'
 	BL @LOAD
-	
 	CLR R0
 	LI R1,PATBUF
 	LI R2,6144
 	BL @VMBR
-
 * now load the color table into place
 	LI R0,>2000
-	MOV R15,R1
-	LI R2,>4300			* 'C'
+	LI R2,>4300				* 'C'
 	BL @LOAD
-
 * finally, load the palette data (in the pattern table address)		
 	CLR R0
-	MOV R15,R1
-	LI R2,>4D00			* 'M'
+	LI R2,>4D00				* 'M'
 	BL @LOAD
-	
 * Get the GPU code into VDP as well
-	LI R0,PROGLD		* load address of code
-	LI R1,PROG			* code itself
+	LI R0,PROGLD			* load address of code
+	LI R1,PROG				* code itself
 	LI R2,PROGEND-PROG	* number of bytes
 	BL @VMBW
-	
 * Now start it running
-	LI R0,>B61B			* MSB
+	LI R0,>B61B				* MSB
 	BL @VDPWA
-	LI R0,>B720			* LSB
+	LI R0,>B720				* LSB
 	BL @VDPWA
-	
 * GPU is now working on the palette. We'll copy in the
 * pattern table at the same time. Although it's the same
 * buffer, the GPU is WAY faster and should be way ahead
@@ -2048,84 +2040,27 @@ MODE6V
 	LI R1,PATBUF
 	LI R2,6144
 	BL @VMBW
-	
 * Set the special flag for the main code to restore
 * the VDP buffer!
 	SETO @VDPBAD
-
 * GPU should be idling, so just wake it up
 	LI R0,>B801
 	BL @VDPWA
-		
 	LI R0,>E200
-	BL @SETR1			* enable display
-	
-	BL @DELAY			* wait 10 seconds (with return to menu)
-	
-	BL @BCDINC			* next image
-	MOV R15,@COUNT6		* save it
-	CI R15,>0061		* are we done?
-	JNE MODE6L			* no!
-	
-	LI R15,>0001
-	MOV R15,@COUNT6
-	B @START			* yes
-
-* 7) for continuous random              
-MODE7
-* WE OWN R7! Muhaha! We use it to store the max picture index, based on F18 support
-	LI R7,240			* assume no F18A - 240 pics available
-	LI R0,MODE72
-	MOV R0,@SAVE2		* jump over change if it's not there
-	BL @TESTF18
-
-MODE7O
-	LI R7,360			* it IS real!! - 360 pics available
-
-* Here we just run forever - we pick a random image
-MODE72
-	LI R0,>81A0
-	BL @VDPWA			* clear display (no need for SetR1 here)
-	BL @RESTF18			* and reset the F18
-
-	MOV @VDPBAD,R0		* is VDP DSR space corrupt?
-	JEQ MODE7V
-	
-	LI R0,>3BDC
-	LI R1,DSRBUF
-	LI R2,1060
-	BL @VMBW			* yes, restore it
-	CLR @VDPBAD
-
-MODE7V
-	CLR @INTFTN			* remove any old interrupt function
-	BL @RAND			* get randomish number into R1
-	CLR R0				* extend to 32-bits
-	DIV R7,R0			* divide by the number of desired pics, R1 gets remainder
-	
-* The picture number is in R1, so now divide again to get the group and file number
-* the groups themselves deal with the actual disk division
-	LI R2,60			* sixty pics per group
-	CLR R0				* just picture number
-	DIV R2,R0			* R0 gets group, R1 gets image in that group
-	MOVB @BCD(R1),R1	* Hah! Hacky lookup from hex->BCD
-	SRL R1,8
-	MOV R0,R2			* R0 can't be an index register
-	SLA R2,1			* multiply by 2 for word index
-	MOV R1,@COUNT1(R2)	* Store image number in the appropriate3 group
-	MOV @TABLE(R2),R0	* get jump address
-	SETO @ONESHOT		* flag a one-shot load
-	B *R0				* go do it! they will come back here
+	BL @SETR1				* enable display
+	BL @DELAY				* wait 10 seconds (with return to menu)
+	MOV @POSTPIC,R11
+	B *R11
 
 SLAST
 
 * Empty buffers that are not saved with the program
 SAVE  BSS 2	
 SAVE2 BSS 2
+POSTPIC BSS 2
 FLAG  BSS 2
 INPUTNUMS BSS 2
 INTFTN BSS 2
-ONESHOT BSS 2
 RNDSED BSS 2
 PALBUF BSS 32
 PATBUF BSS 6144
@@ -2143,8 +2078,12 @@ RECLEN BSS 2					* record length from open - note: BYTE!
 RECMODE BSS 2					* record mode from open - note: BYTE!
 DSRREC BSS 2					* record index for PAB
 DSRERR BSS 2					* error byte from PAB
-ENTRIES BSS 262				* 12 entries + 2 bytes so I can have some zero bytes to NUL terminate
+ENTRIES BSS 240				* 12 entries @ 20 bytes each
+WORKENTRY BSS 20			* used for a single file
 RECORDBUF BSS 256
+LASTMBUF BSS 256
+COUNT1 bss 2
+COUNT2 bss 2
 
 	END
 
