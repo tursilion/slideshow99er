@@ -1,6 +1,3 @@
-** TODO: Flicker folder is not displaying Luna - why?
-** TODO: Test F18A modes
-
 * New slideshow
 *
 * Supported types:
@@ -60,11 +57,16 @@ VDPST EQU >8802
 VDPWD EQU >8C00
 VDPWADR EQU >8C02
 
+* buffers
+DSRSAVE EQU >3BDC			* save DSR from here (check each, length hard coded)
+DSRRECORD EQU >3ADC		* 256 bytes for disk records - this is okay for all but scanline palette
+
 SLOAD
 SFIRST
+START
 	LWPI >8300
 	BL @TESTF18					* test for the F18A first of all
-	B @START						* now go do the main code
+	B @BEGIN						* now go do the main code
 	
 VDPBAD DATA >0000
 DSRDAT DATA >2EAA
@@ -716,8 +718,9 @@ MENUKY
 * does it internally for the sake of the F18A versions
 DELAY
 	MOV R11,@SAVE2
-	LI R3,0
+	LI R3,1
 	MOV @DELTM,R1
+	JEQ DELLP					* zero seconds requested
 TMLP
 	AI R3,60					* one second in jiffies
 	DEC R1
@@ -739,7 +742,7 @@ WAIT
 	MOVB @>8375,R1
 	CI R1,>0F00				* FCTN-9 key?
 	JNE WAIT2
-	B @START					* restart if yes
+	B @BEGIN					* restart if yes
 WAIT2
 	CI R1,>2000				* space key?
 	JNE WAIT3
@@ -766,6 +769,7 @@ QUITK
 *
 REBOOT
 	BL @RESTF18
+	BL @LOCKF18
 	
 * we've done all we can, the only thing left is that the VDP is still in enhanced mode (maybe)
 	BLWP @>0000 			* Software reset	
@@ -833,11 +837,17 @@ RESTLP
 	LI R1,PALT
 	BL @LOADPAL
 	
+	MOV @SAVE2,R11
+	B *R11
+	
+* lock F18 if it's still unlocked (pre 1.6)
+LOCKF18
+	MOV R11,@SAVE2
+
 * reset the F18A to defaults (except palette, requires 1.6)	
 	LI R0,>B280				* VR2/50, value 10000000
 	BL @VDPWA					* reset and lock F18A, or corrupt R2
-
-* and lock it if it's still unlocked (pre 1.6)
+	
 	LI R0,>B900       * VR1/57, value 00000000
 	BL @VDPWA          * write once (corrupts VDPR1)
 	
@@ -1198,6 +1208,10 @@ inlp2
 	jmp inlp2
 	
 inkey
+	ci r2,>0F00		* back
+  jne nobackin
+  b @start
+nobackin
   ci r2,>0800
   jeq inbacksp
 	ci r2,>0D00
@@ -1310,8 +1324,9 @@ inynlp
 	jeq inno
 	ci r2,>6e00
 	jeq inno
-	
-	jmp inynlp
+	ci r2,>0F00		* back
+  jne inynlp
+  b @start
 	
 inyes
 	SWPB R0
@@ -1376,9 +1391,7 @@ CATALOG
 	
 catopen
 * we're in business, try to read!
-* not sure where in VDP is good... just use >1000 for now
-* everywhere is bad when an image is up ;)
-	li r0,>1000
+	li r0,DSRRECORD
 	mov r6,r1
 	ai r1,-18
 	bl @wrapread
@@ -1387,7 +1400,7 @@ catopen
 	
 * record zero is disk information, skip that and now we can start to loop
 catloop
-	li r0,>1000
+	li r0,DSRRECORD
 	mov r6,r1
 	ai r1,-18
 	bl @wrapread
@@ -1395,7 +1408,7 @@ catloop
 	jne caterr
 	
 * got a record, copy it to CPU and then see if it's a _P type
-	li r0,>1000
+	li r0,DSRRECORD
 	li r1,recordbuf
 	clr r2
 	movb @PAB+5,r2		* get read bytes count from PAB copy (note: fixed records, always FE)
@@ -1441,27 +1454,22 @@ gotprog
 * save off the file size data for comparison use later if we find a match
 * r0 is already pointing after the filename, so we can backup 5 to check (_P)
 	ai r0,-5
-	movb *r0+,r1
-	swpb r1
-	movb *r0+,r1					* last two chars of filename (reversed)
-	ci r1,>4D5F						* M_ (remember, it's reversed)
+	movb *r0+,r2
+	swpb r2
+	movb *r0+,r2					* last two chars of filename (reversed)
+	ci r2,>4D5F						* M_ (remember, it's reversed)
 	JNE checkP
 	
 * copy the buffer to lastmbuf - I don't want to mess with a lot of registers, so slowish...
-	li r1,>0100
+	li r1,>00FE
 gotplp
 	mov @recordbuf(r1),@lastmbuf(r1)
 	dect r1
 	joc gotplp
 
-* got a program type file, so we need to check if it's an _P (that's all we count)
-* now we just need to back up 2
+* now check if it's an _P
 checkP
-	ai r0,-2
-	movb *r0+,r1
-	swpb r1
-	movb *r0+,r1					* last two chars of filename (reversed)
-	ci r1,>505F						* P_ (remember, it's reversed)
+	ci r2,>505F						* P_ (remember, it's reversed)
 	jne catloop						* next record if not our style
 	
 * now we have found a file we want to consider, play with the counters
@@ -1507,7 +1515,7 @@ caterr
 
 ****************************
 * HERE WE GO - we also loop through this point
-START
+BEGIN
 	LWPI >8300
 	BL @RESTF18			* reset the F18 if present and active
 	LI R1,TXREGS
@@ -1533,14 +1541,14 @@ CHKVDP
 	JNE STREST
 * it's okay, so make a copy of it
 	BL @FILES				* make sure only 1 file
-	LI R0,>3BDC
+	LI R0,DSRSAVE
 	LI R1,DSRBUF
 	LI R2,1060
 	BL @VMBR
 	JMP STOK
 STREST	
 * It's bad, restore it
-	LI R0,>3BDC
+	LI R0,DSRSAVE
 	LI R1,DSRBUF
 	LI R2,1060
 	BL @VMBW
@@ -1740,7 +1748,7 @@ stlop
 	jeq goforit
 	ci r0,>0F00		* back
 	jne stlop
-	b @start
+	b @begin
 	
 *
 * We are going to go ahead now and start showing pics
@@ -1752,7 +1760,7 @@ goforit
 	seto @count1		* first image (-1 for upcoming increment)
 	mov @totcnt,@count2		* countdown to end of loop, if not looping
 	jne goforlpx
-	b @start				* no images to run!
+	b @begin				* no images to run!
 
 goforlpx
 	inc @count2			* for the upcoming pre-decrement
@@ -1769,18 +1777,16 @@ notattot
 
 	dec @count2			* count down
 	jne notdonego
-	b @start				* all done
+	b @begin				* all done
 	
 notdonego
-	LI R0,>81A0
-	BL @VDPWA				* clear display (no need for SetR1 here)
-	CLR @INTFTN			* remove any old interrupt function
-	BL @RESTF18			* and reset the F18
+*	LI R0,>81A0			* hm. Only scanline bitmap mode should really corrupt. TODO? Need this?
+*	BL @VDPWA				* clear display (no need for SetR1 here)
 
 	MOV @VDPBAD,R0	* is VDP DSR space corrupt?
 	JEQ MODE7V
 	
-	LI R0,>3BDC
+	LI R0,DSRSAVE
 	LI R1,DSRBUF
 	LI R2,1060
 	BL @VMBW				* yes, restore it
@@ -1805,7 +1811,7 @@ searchlp
 	ai r0,20				* next entry
 	ci r0,entries+258	* at the end?
 	jl searchlp
-	b @start				* give up - this shouldn't happen...
+	b @begin				* give up - this shouldn't happen...
 	
 * r1 contains the index on the current device
 * r0 contains the device entry (pointer to count)
@@ -1825,12 +1831,16 @@ fonitlp
 	bl @catalog
 	mov @dsrerr,r0	* check for error
 	jeq foundok
-	b @start				* something went wrong
+	b @begin				* something went wrong
 
 * now the file information is in recordbuf, and if applicable,
 * the _M file data is in lastMbuf (need to verify that lastMBuf
 * is for the same file, though)
 foundok
+* okay, before we do anything else - make sure everything is turned off
+	CLR @INTFTN			* remove any old interrupt function
+	BL @RESTF18			* and reset the F18
+
 	clr r7					* will eventually contain the file size
 	clr r1
 	movb @lastmbuf,r1
@@ -1883,7 +1893,7 @@ gotm3
 	b @goforlp
 	
 gotm4
-	ci r7,>001A
+	ci r7,>0019
 	jne gotm5				* something unknown got in there...
 	bl @MODE6
 gotm5
@@ -1893,9 +1903,9 @@ gotm5
 * 1) for 9918A Bitmap                   
 MODE1
 	MOV R11,@POSTPIC
-	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
 	BL @VDPWA					* clear display (no need for SetR1 here)
+	BL @BITMAP				* Set bitmap mode
 	CLR R0
 	LI R2,>5000				* 'P'
 	BL @LOAD
@@ -1918,9 +1928,9 @@ MODE1COL
 * 4) for 9918A half-multicolor (flicker)
 MODE4
 	MOV R11,@POSTPIC
-	BL @HALFM					* Set half-multicolor mode
 	LI R0,>81A0
 	BL @VDPWA					* clear display (no need for SetR1 here)
+	BL @HALFM					* Set half-multicolor mode
 	CLR R0
 	LI R2,>5000				* 'P'
 	BL @LOAD
@@ -1966,9 +1976,9 @@ MODE5
 	B *R11
 MODE5OK
 	MOV R11,@POSTPIC
-	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
 	BL @VDPWA					* clear display (no need for SetR1 here)
+	BL @BITMAP				* Set bitmap mode
 	CLR R0
 	LI R2,>5000				* 'P'
 	BL @LOAD
@@ -1997,11 +2007,11 @@ MODE6
 	B *R11
 MODE6OK
 	MOV R11,@POSTPIC
-	BL @BITMAP				* Set bitmap mode
 	LI R0,>81A0
 	BL @VDPWA					* clear display (no need for SetR1 here)
-	LI R0,>B800				* stop the GPU
+	LI R0,>B800				* stop the GPU (should already be stopped)
 	BL @VDPWA
+	BL @BITMAP				* Set bitmap mode
 * there's a small problem here that we destroy the disk buffers with our
 * image data (there MAY be a way to arrange it all to fit, but it's tight)
 * we have to first load EVERYTHING, then backup the DSR, then we can
@@ -2049,6 +2059,12 @@ MODE6OK
 	LI R0,>E200
 	BL @SETR1				* enable display
 	BL @DELAY				* wait 10 seconds (with return to menu)
+
+* there's not much we can do to leave this one up and working, but we'll try!
+*	LI R0,>81A0			* hm. Only scanline bitmap mode should really corrupt. TODO? Need this?
+*	BL @VDPWA				* clear display (no need for SetR1 here)
+*	BL @RESTF18			* and reset the F18
+	
 	MOV @POSTPIC,R11
 	B *R11
 
