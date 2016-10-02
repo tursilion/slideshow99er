@@ -1780,9 +1780,6 @@ notattot
 	b @begin				* all done
 	
 notdonego
-*	LI R0,>81A0			* hm. Only scanline bitmap mode should really corrupt. TODO? Need this?
-*	BL @VDPWA				* clear display (no need for SetR1 here)
-
 	MOV @VDPBAD,R0	* is VDP DSR space corrupt?
 	JEQ MODE7V
 	
@@ -1944,6 +1941,10 @@ MODE4
 	MOV R1,@INTFTN
 * We don't enable the display here because the interrupt routine toggles VDP R1 anyway
 	BL @DELAY					* wait 10 seconds (with return to menu)
+	
+	LI R0,>81A0			* hide the corruption caused by disk access
+	BL @VDPWA				* clear display (no need for SetR1 here)
+	
 	MOV @POSTPIC,R11
 	B *R11
 	
@@ -2061,8 +2062,8 @@ MODE6OK
 	BL @DELAY				* wait 10 seconds (with return to menu)
 
 * there's not much we can do to leave this one up and working, but we'll try!
-*	LI R0,>81A0			* hm. Only scanline bitmap mode should really corrupt. TODO? Need this?
-*	BL @VDPWA				* clear display (no need for SetR1 here)
+	LI R0,>81A0			* hide the corruption caused by disk access
+	BL @VDPWA				* clear display (no need for SetR1 here)
 *	BL @RESTF18			* and reset the F18
 	
 	MOV @POSTPIC,R11
