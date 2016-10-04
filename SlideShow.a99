@@ -1858,6 +1858,8 @@ foklp
 * 25(08 40 1A) - scanline paletted bitmap - MODE6
 * we cheat again, just the first 3 bytes of the floating point number
 * remember the filename length is variable...
+* HDX under-reports the size by 1 sector... since that's a common error,
+* (not counting the FDR), let's just accept it too.
   clr r1
   movb @lastmbuf,r1		* name length
   swpb r1							* as number
@@ -1878,23 +1880,78 @@ gotmsize
 	b @goforlp
 	
 gotm2
+  ci r7,>0008
+  jeq gotm22
 	ci r7,>0009
 	jne gotm3
+gotm22
 	bl @MODE4
 	b @goforlp
 	
 gotm3
+	ci r7,>0001
+	jeq gotm33
 	ci r7,>0002
 	jne gotm4
+gotm33	
 	bl @MODE5
 	b @goforlp
 	
 gotm4
+	ci r7,>0018
+	jeq gotm44
 	ci r7,>0019
 	jne gotm5				* something unknown got in there...
+gotm44
 	bl @MODE6
 gotm5
-	b @goforlp
+****************************
+* TODO TODO TODO - branch to ignore error, don't branch for debug
+*	b @goforlp
+
+	BL @RESTF18			* reset the F18 if present and active
+	LI R1,TXREGS
+	BL @LOADRG			* set text mode
+	BL @CHARSET			* load character set from GROM
+	CLR R0
+	LI R1,>2000
+	LI R2,960
+	BL @VMBS
+	LI R0,>F000
+	BL @SETR1
+
+	mov r7,r1
+	li r0,1
+	bl @prnum
+	li r1,deberr
+	bl @PRLP
+	
+	clr r1
+	movb @lastmbuf,r1
+	swpb r1
+	ai r1,lastmbuf+1
+	li r2,>7e00
+	movb r2,*r1
+	
+	li r0,41
+	li r1,PAB+18
+	bl @print
+	li r1,lastmbuf+1
+	bl @prlp
+	
+debwait
+	bl @kscan
+	clr r1
+	movb @>8375,R1
+	ci r1,>ff00
+	jeq debwait
+	
+	B @start
+	
+deberr	TEXT ' <- FILE UNKNOWN SIZE~'
+	EVEN
+*
+******************************
 
 
 * 1) for 9918A Bitmap                   
