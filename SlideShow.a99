@@ -78,7 +78,7 @@ CURSOR DATA >F8F8,>F8F8,>F8F8,>F8F8
 * BL @FILES
 *
 * We need to implement a CALL FILES(1) before use to make loading work better
-* That puts the top of VRAM at >3BDB. With that there, we can load everything
+* That puts the top of VRAM at >3BE3. With that there, we can load everything
 * except per-scanline paletted images without conflicting with the disk system.
 * For those, we can backup the disk buffers as they are only 1061 bytes
 *
@@ -700,7 +700,7 @@ KSCAN
 	SRC 12,7				* delay
 	LI 12,>0006
 	STCR 5,8 				* Fetch CRU
-	CZC @QUITK,5 		* QUIT key?
+	CZC @QUITK,R5 		* QUIT key?
 	JNE MENUKY
 	B @REBOOT				* reboot if yes
 	
@@ -1349,7 +1349,7 @@ inno
 	MOVB R0,@>8C02
 	movb r2,@>8c00		; character out
 	
-	li r2,>4E7E				; write Y and terminating tilde
+	li r2,>4E7E				; write N and terminating tilde
 	movb r2,*r1+
 	swpb r2
 	movb r2,*r1+
@@ -1904,10 +1904,11 @@ gotm4
 	jne gotm5				* something unknown got in there...
 gotm44
 	bl @MODE6
+	b @goforlp
 gotm5
 ****************************
-* TODO TODO TODO - branch to ignore error, don't branch for debug
-*	b @goforlp
+* TODO TODO TODO - to remove this error test code, move
+* the gotm5 label ABOVE the b @goforlp
 
 	BL @RESTF18			* reset the F18 if present and active
 	LI R1,TXREGS
